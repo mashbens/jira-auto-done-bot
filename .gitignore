@@ -3,3 +3,5 @@
 jira_daily_done.log
 data/
 bot.out
+__pycache__/
+*.pyc

@@ -6,3 +6,5 @@ bot.out
 .last_run_state.json
 .git
 README.md
+__pycache__/
+*.pyc
