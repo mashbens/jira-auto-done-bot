@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Helper Jira yang dipakai bareng oleh scheduler cron dan bot Telegram."""
+"""Helper Jira yang dipakai bareng oleh bot Telegram dan CLI jira_daily_done."""
 
 import base64
 import json

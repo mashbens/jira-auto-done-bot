@@ -2,9 +2,8 @@
 COMPOSE := docker compose
 PY := python3
 
-.PHONY: help build up down restart logs logs-bot logs-sched ps shell \
-        dry-run next done status bot-local sched-local stop-local \
-        stop-legacy clean env-check
+.PHONY: help build up down restart logs ps shell \
+        dry-run next done status bot-local stop-local clean env-check
 
 help: ## Tampilkan daftar perintah
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -15,27 +14,21 @@ help: ## Tampilkan daftar perintah
 build: ## Build image
 	$(COMPOSE) build
 
-up: ## Jalankan bot + scheduler di background
+up: ## Jalankan bot di background
 	$(COMPOSE) up -d --build
 	@$(MAKE) --no-print-directory ps
 
 down: ## Stop dan hapus container
 	$(COMPOSE) down
 
-restart: ## Restart kedua service
+restart: ## Restart bot
 	$(COMPOSE) restart
 
 ps: ## Status container
 	$(COMPOSE) ps
 
-logs: ## Ikuti log semua service
+logs: ## Ikuti log bot
 	$(COMPOSE) logs -f --tail=50
-
-logs-bot: ## Ikuti log bot Telegram saja
-	$(COMPOSE) logs -f --tail=50 bot
-
-logs-sched: ## Ikuti log scheduler saja
-	$(COMPOSE) logs -f --tail=50 scheduler
 
 shell: ## Masuk shell di container bot
 	$(COMPOSE) exec bot /bin/bash
@@ -71,17 +64,11 @@ env-check: ## Cek konfigurasi .env terbaca dan kredensial Jira valid
 bot-local: ## Jalankan bot Telegram di foreground
 	$(PY) telegram_bot.py
 
-sched-local: ## Jalankan scheduler di foreground
-	$(PY) scheduler_loop.py
-
-stop-local: ## Matikan bot/scheduler yang jalan di luar Docker
-	-pkill -f "$(PY) telegram_bot.py"
-	-pkill -f "$(PY) scheduler_loop.py"
-	@echo "Proses lokal dihentikan."
-
-stop-legacy: stop-local ## Matikan proses lokal DAN hapus cron lama (sebelum pindah ke Docker)
-	-crontab -r
-	@echo "Cron dihapus. Sekarang aman jalanin: make up"
+stop-local: ## Matikan bot yang jalan di luar Docker
+	@# Kurung siku bikin pola tidak cocok dengan command line make/shell ini sendiri,
+	@# kalau tidak pkill bakal bunuh diri sebelum target berikutnya jalan.
+	-@pkill -f "[t]elegram_bot.py" || true
+	@echo "Bot lokal dihentikan."
 
 clean: ## Hapus cache Python dan file sementara
 	rm -rf __pycache__ bot.out

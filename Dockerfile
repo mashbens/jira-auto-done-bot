@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-COPY jira_client.py jira_daily_done.py telegram_bot.py scheduler_loop.py ./
+COPY jira_client.py jira_daily_done.py telegram_bot.py ./
 
 # State & log ditulis ke volume, bukan ke layer image
 RUN mkdir -p /data && useradd -m -u 1000 app && chown -R app:app /app /data

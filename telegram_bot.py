@@ -3,7 +3,7 @@
 Bot Telegram buat nge-done sub-task Jira secara manual.
 
   /list        daftar sub-task open, tinggal tap tombolnya
-  /next        lihat kandidat berikutnya versi scheduler harian
+  /next        sub-task yang paling lama nganggur
   /done KEY    langsung done issue tertentu
   /status      ringkasan antrian
 
@@ -120,7 +120,7 @@ def handle_command(cfg, chat_id, text):
             chat_id,
             "<b>Jira sub-task bot</b>\n\n"
             "/list — daftar sub-task open, tap buat nge-done\n"
-            "/next — kandidat berikutnya versi scheduler harian\n"
+            "/next — sub-task yang paling lama nganggur\n"
             "/done KEY — langsung done issue tertentu\n"
             "/status — ringkasan antrian",
         )
