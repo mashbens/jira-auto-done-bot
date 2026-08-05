@@ -214,10 +214,16 @@ def main():
         print("TELEGRAM_BOT_TOKEN belum diisi di .env")
         return 1
 
-    cfg = get_config()
+    try:
+        cfg = get_config()
+    except JiraError as e:
+        log(f"Config Jira bermasalah: {e}")
+        log("Perbaiki .env lalu: docker compose up -d --force-recreate")
+        return 1
+
     me = tg("getMe").get("result", {})
     if not me:
-        print("Token Telegram ditolak. Cek TELEGRAM_BOT_TOKEN di .env")
+        log("Token Telegram ditolak. Cek TELEGRAM_BOT_TOKEN di .env")
         return 1
     log(f"Bot jalan sebagai @{me.get('username')}. Ctrl-C buat berhenti.")
 

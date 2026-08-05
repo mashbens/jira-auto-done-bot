@@ -34,8 +34,13 @@ def load_env():
 def log(msg):
     stamp = f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] {msg}"
     print(stamp, flush=True)
-    with LOG_FILE.open("a") as f:
-        f.write(stamp + "\n")
+    try:
+        with LOG_FILE.open("a") as f:
+            f.write(stamp + "\n")
+    except OSError as e:
+        # Volume read-only atau salah owner (bind mount dibuat root, container UID 1000).
+        # stdout sudah kepegang docker logs, jadi jangan bikin proses mati gara-gara ini.
+        print(f"  (log ke {LOG_FILE} gagal: {e})", flush=True)
 
 
 def get_config():
