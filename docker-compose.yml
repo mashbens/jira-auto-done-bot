@@ -1,0 +1,30 @@
+services:
+  bot:
+    build: .
+    image: jira-subtask-bot
+    container_name: jira-bot
+    command: python3 telegram_bot.py
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Asia/Jakarta}
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  scheduler:
+    build: .
+    image: jira-subtask-bot
+    container_name: jira-scheduler
+    command: python3 scheduler_loop.py
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Asia/Jakarta}
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

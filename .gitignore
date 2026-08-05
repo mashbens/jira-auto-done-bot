@@ -1,0 +1,5 @@
+.env
+.last_run_state.json
+jira_daily_done.log
+data/
+bot.out
