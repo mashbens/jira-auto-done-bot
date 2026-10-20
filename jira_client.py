@@ -100,13 +100,22 @@ FIELDS = ["summary", "status", "duedate", "parent"]
 
 def list_open_subtasks(cfg, limit=50):
     """Sub-task open sesuai JQL di .env, urut dari yang paling lama."""
-    result = api(
-        cfg,
-        "/search/jql",
-        "POST",
-        {"jql": cfg["jql"], "maxResults": limit, "fields": FIELDS},
-    )
-    return result.get("issues", [])
+    issues, token = [], None
+    # /search/jql dibatasi per halaman, jadi ikuti nextPageToken sampai limit
+    while len(issues) < limit:
+        body = {
+            "jql": cfg["jql"],
+            "maxResults": min(100, limit - len(issues)),
+            "fields": FIELDS,
+        }
+        if token:
+            body["nextPageToken"] = token
+        result = api(cfg, "/search/jql", "POST", body)
+        issues += result.get("issues", [])
+        token = result.get("nextPageToken")
+        if not token:
+            break
+    return issues
 
 
 def get_issue(cfg, key):

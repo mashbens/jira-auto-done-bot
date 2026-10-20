@@ -2,7 +2,7 @@
 """
 Bot Telegram buat nge-done sub-task Jira secara manual.
 
-  /l           daftar sub-task open, tinggal tap tombolnya
+  /l           daftar sub-task open, centang lalu bulk done
   /next        sub-task yang paling lama nganggur
   /done KEY    langsung done issue tertentu
   /status      ringkasan antrian
@@ -10,6 +10,7 @@ Bot Telegram buat nge-done sub-task Jira secara manual.
 Long polling, stdlib doang. Jalankan: python3 telegram_bot.py
 """
 
+import html
 import json
 import os
 import sys
@@ -28,6 +29,13 @@ from jira_client import (
 )
 
 PAGE_SIZE = 8
+LIST_LIMIT = 300
+MAX_BULK = 50  # rem darurat biar salah tap gak nge-done ratusan issue
+
+# State per chat, cukup di memori: kalau bot restart, centangan hilang.
+# callback_data Telegram maks 64 byte, jadi pilihan gak bisa dititip di tombol.
+cache = {}  # chat_id -> list issue dari fetch terakhir
+selected = {}  # chat_id -> set key yang dicentang
 
 
 def tg(method, payload=None):
@@ -79,24 +87,48 @@ def is_allowed(chat_id):
     return str(chat_id) in [c.strip() for c in allowed.split(",")]
 
 
-def build_list(cfg, page=0):
-    issues = list_open_subtasks(cfg, limit=50)
+def page_chunk(issues, page):
+    pages = max(1, (len(issues) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    return issues[page * PAGE_SIZE : (page + 1) * PAGE_SIZE], page, pages
+
+
+def build_list(cfg, chat_id, page=0, refresh=False):
+    # Toggle centang pakai cache, biar tiap tap gak nembak Jira lagi
+    if refresh or chat_id not in cache:
+        cache[chat_id] = list_open_subtasks(cfg, limit=LIST_LIMIT)
+    issues = cache[chat_id]
+    sel = selected.setdefault(chat_id, set())
+    sel &= {i["key"] for i in issues}  # buang yang sudah gak open
     if not issues:
         return "Gak ada sub-task open. Bersih. 🎉", None
 
-    pages = max(1, (len(issues) + PAGE_SIZE - 1) // PAGE_SIZE)
-    page = max(0, min(page, pages - 1))
-    chunk = issues[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+    chunk, page, pages = page_chunk(issues, page)
 
-    lines = [f"<b>{len(issues)} sub-task open</b> — halaman {page + 1}/{pages}", ""]
-    keyboard = []
+    lines = [
+        f"<b>{len(issues)} sub-task open</b> — halaman {page + 1}/{pages}"
+        f" · {len(sel)} dipilih",
+        "",
+    ]
+    buttons = []
     for i in chunk:
         f = i["fields"]
-        lines.append(f"<code>{i['key']}</code> · {f['status']['name']}\n{f['summary']}")
-        lines.append("")
-        keyboard.append(
-            [{"text": f"✅ {i['key']}", "callback_data": f"ask:{i['key']}:{page}"}]
+        mark = "☑️" if i["key"] in sel else "⬜"
+        lines.append(
+            f"{mark} <code>{i['key']}</code> · {f['status']['name']}\n"
+            f"{html.escape(f['summary'])}"
         )
+        lines.append("")
+        buttons.append(
+            {"text": f"{mark} {i['key']}", "callback_data": f"tog:{i['key']}:{page}"}
+        )
+    keyboard = [buttons[n : n + 2] for n in range(0, len(buttons), 2)]
+    keyboard.append(
+        [
+            {"text": "☑️ Pilih hal. ini", "callback_data": f"all:{page}"},
+            {"text": "⬜ Kosongkan", "callback_data": f"clr:{page}"},
+        ]
+    )
 
     nav = []
     if page > 0:
@@ -105,9 +137,71 @@ def build_list(cfg, page=0):
         nav.append({"text": "Next ➡️", "callback_data": f"page:{page + 1}"})
     if nav:
         keyboard.append(nav)
-    keyboard.append([{"text": "🔄 Refresh", "callback_data": f"page:{page}"}])
+    if sel:
+        keyboard.append(
+            [{"text": f"✅ Done terpilih ({len(sel)})", "callback_data": f"bulk:{page}"}]
+        )
+    keyboard.append([{"text": "🔄 Refresh", "callback_data": f"ref:{page}"}])
 
     return "\n".join(lines), keyboard
+
+
+def back_button(page):
+    return [[{"text": "📋 Kembali ke list", "callback_data": f"ref:{page}"}]]
+
+
+def confirm_bulk(chat_id, message_id, page):
+    keys = sorted(selected.get(chat_id, ()))
+    if not keys:
+        edit(chat_id, message_id, "Belum ada yang dicentang.", back_button(page))
+        return
+    if len(keys) > MAX_BULK:
+        edit(
+            chat_id,
+            message_id,
+            f"Kebanyakan: {len(keys)} dipilih, maksimal {MAX_BULK} sekali jalan.",
+            [[{"text": "📋 Kembali ke list", "callback_data": f"page:{page}"}]],
+        )
+        return
+    listing = "\n".join(f"• <code>{k}</code>" for k in keys)
+    edit(
+        chat_id,
+        message_id,
+        f"Yakin mau done <b>{len(keys)} issue</b> ini?\n\n{listing}",
+        [
+            [
+                {"text": f"✅ Ya, done {len(keys)}", "callback_data": f"bdo:{page}"},
+                {"text": "❌ Batal", "callback_data": f"page:{page}"},
+            ]
+        ],
+    )
+
+
+def run_bulk(cfg, chat_id, message_id, page):
+    keys = sorted(selected.get(chat_id, ()))
+    # Kosongkan duluan: tap dobel di tombol konfirmasi jadi gak jalan dua kali
+    selected[chat_id] = set()
+    if not keys:
+        edit(chat_id, message_id, "Gak ada yang dipilih.", back_button(page))
+        return
+
+    ok, fail = [], []
+    for n, key in enumerate(keys, 1):
+        edit(chat_id, message_id, f"⏳ Proses {n}/{len(keys)}: <code>{key}</code>...")
+        try:
+            complete_issue(cfg, get_issue(cfg, key))
+            ok.append(key)
+        except JiraError as e:
+            fail.append((key, str(e)))
+    cache.pop(chat_id, None)
+    log(f"BULK done: {len(ok)} berhasil, {len(fail)} gagal")
+
+    text = f"✅ <b>{len(ok)} berhasil</b>"
+    if fail:
+        text += f", ⚠️ <b>{len(fail)} gagal</b>\n\n" + "\n".join(
+            f"<code>{k}</code>: {html.escape(e)}" for k, e in fail
+        )
+    edit(chat_id, message_id, text, back_button(page))
 
 
 def handle_command(cfg, chat_id, text):
@@ -119,13 +213,13 @@ def handle_command(cfg, chat_id, text):
         send(
             chat_id,
             "<b>Jira sub-task bot</b>\n\n"
-            "/l — daftar sub-task open, tap buat nge-done\n"
+            "/l — daftar sub-task open, centang lalu done sekaligus\n"
             "/next — sub-task yang paling lama nganggur\n"
             "/done KEY — langsung done issue tertentu\n"
             "/status — ringkasan antrian",
         )
     elif cmd == "/l":
-        text, keyboard = build_list(cfg, 0)
+        text, keyboard = build_list(cfg, chat_id, 0, refresh=True)
         send(chat_id, text, keyboard)
     elif cmd == "/next":
         issues = list_open_subtasks(cfg, limit=1)
@@ -140,7 +234,7 @@ def handle_command(cfg, chat_id, text):
                 [[{"text": "✅ Done sekarang", "callback_data": f"ask:{issues[0]['key']}:0"}]],
             )
     elif cmd == "/status":
-        issues = list_open_subtasks(cfg, limit=50)
+        issues = list_open_subtasks(cfg, limit=LIST_LIMIT)
         by_status = {}
         for i in issues:
             s = i["fields"]["status"]["name"]
@@ -178,9 +272,24 @@ def handle_callback(cfg, cb):
 
     action, _, rest = data.partition(":")
 
-    if action == "page":
-        text, keyboard = build_list(cfg, int(rest))
+    if action in ("page", "ref"):
+        text, keyboard = build_list(cfg, chat_id, int(rest), refresh=action == "ref")
         edit(chat_id, message_id, text, keyboard)
+    elif action in ("tog", "all", "clr"):
+        if action == "tog":
+            key, _, rest = rest.partition(":")
+            selected.setdefault(chat_id, set()).symmetric_difference_update({key})
+        elif action == "all" and chat_id in cache:
+            chunk, _, _ = page_chunk(cache[chat_id], int(rest))
+            selected.setdefault(chat_id, set()).update(i["key"] for i in chunk)
+        elif action == "clr":
+            selected[chat_id] = set()
+        text, keyboard = build_list(cfg, chat_id, int(rest))
+        edit(chat_id, message_id, text, keyboard)
+    elif action == "bulk":
+        confirm_bulk(chat_id, message_id, int(rest))
+    elif action == "bdo":
+        run_bulk(cfg, chat_id, message_id, int(rest))
     elif action == "ask":
         key, _, page = rest.partition(":")
         ask_confirm(chat_id, key, int(page or 0), message_id)
@@ -197,14 +306,14 @@ def handle_callback(cfg, cb):
                 f"{issue['fields']['summary']}\n\n"
                 f"<i>{'; '.join(steps)}</i>\n"
                 f'<a href="{base}/browse/{key}">Buka di Jira</a>',
-                [[{"text": "📋 Kembali ke list", "callback_data": f"page:{page or 0}"}]],
+                [[{"text": "📋 Kembali ke list", "callback_data": f"ref:{page or 0}"}]],
             )
         except JiraError as e:
             edit(
                 chat_id,
                 message_id,
                 f"⚠️ Gagal nge-done <code>{key}</code>\n\n{e}",
-                [[{"text": "📋 Kembali ke list", "callback_data": f"page:{page or 0}"}]],
+                [[{"text": "📋 Kembali ke list", "callback_data": f"ref:{page or 0}"}]],
             )
 
 

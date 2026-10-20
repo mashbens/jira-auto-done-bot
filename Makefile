@@ -3,7 +3,7 @@ COMPOSE := docker compose
 PY := python3
 
 .PHONY: help build up down restart logs ps shell \
-        dry-run next done status bot-local stop-local clean env-check
+        dry-run next done import status bot-local stop-local clean env-check
 
 help: ## Tampilkan daftar perintah
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -43,6 +43,10 @@ next: dry-run ## Alias dari dry-run
 done: ## Done satu issue: make done ISSUE=ATIDIS26-1387
 	@test -n "$(ISSUE)" || { echo "Pakai: make done ISSUE=ATIDIS26-1387"; exit 1; }
 	$(PY) jira_daily_done.py --issue $(ISSUE)
+
+import: ## Bikin sub-task dari CSV: make import CSV=file.csv [DRY=1] [DUE=YYYY-MM-DD]
+	@test -n "$(CSV)" || { echo "Pakai: make import CSV=file.csv [DRY=1] [DUE=2026-11-30]"; exit 1; }
+	$(PY) import_subtasks.py $(CSV) $(if $(DRY),--dry-run) $(if $(DUE),--due $(DUE))
 
 status: ## Ringkasan antrian sub-task open
 	@$(PY) -c "from jira_client import get_config, list_open_subtasks; \
