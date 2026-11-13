@@ -58,9 +58,12 @@ def get_config():
         if s.strip()
     ]
     cfg["comment"] = os.environ.get("JIRA_COMMENT", "")
-    # "today" | "" (jangan diisi) | tanggal eksplisit YYYY-MM-DD
-    due_cfg = os.environ.get("JIRA_DUE_DATE", "today").strip()
-    cfg["set_due"] = date.today().isoformat() if due_cfg == "today" else due_cfg
+    # "today" | "" (jangan diisi) | tanggal eksplisit YYYY-MM-DD.
+    # "today" di-resolve pas nge-done, bukan di sini, soalnya bot jalan berhari-hari.
+    cfg["set_due"] = os.environ.get("JIRA_DUE_DATE", "today").strip()
+    # 1 = timpa due date yang sudah ada (misal 31 Des) jadi tanggal done,
+    # biar jarak due vs selesai gak kejauhan. 0 = cuma isi kalau kosong.
+    cfg["due_overwrite"] = os.environ.get("JIRA_DUE_OVERWRITE", "1").strip() == "1"
 
     missing = [k for k in ("base_url", "email", "token", "jql") if not cfg[k]]
     if missing:
@@ -130,9 +133,12 @@ def complete_issue(cfg, issue):
 
     # Workflow ATIDIS26 punya validator "Due date is required" saat transisi.
     # Isi dulu kalau masih kosong, kalau tidak POST transisi bakal ditolak 400.
-    if cfg["set_due"] and not issue["fields"].get("duedate"):
-        api(cfg, f"/issue/{key}", "PUT", {"fields": {"duedate": cfg["set_due"]}})
-        steps.append(f"due date diisi {cfg['set_due']}")
+    # Kalau due_overwrite nyala, due date lama juga ditimpa jadi tanggal done.
+    due = date.today().isoformat() if cfg["set_due"] == "today" else cfg["set_due"]
+    old_due = issue["fields"].get("duedate")
+    if due and old_due != due and (not old_due or cfg["due_overwrite"]):
+        api(cfg, f"/issue/{key}", "PUT", {"fields": {"duedate": due}})
+        steps.append(f"due date {old_due} -> {due}" if old_due else f"due date diisi {due}")
 
     for step in cfg["status_path"]:
         if current.lower() == step.lower():
