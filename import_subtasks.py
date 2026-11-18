@@ -16,46 +16,21 @@ import csv
 import sys
 from datetime import date
 
-from jira_client import JiraError, api, get_config, log
+from jira_client import (
+    JiraError,
+    api,
+    create_subtask,
+    existing_children,
+    get_config,
+    log,
+    subtask_type_id,
+)
 
 
 def end_of_month():
     today = date.today()
     last = calendar.monthrange(today.year, today.month)[1]
     return today.replace(day=last).isoformat()
-
-
-def adf(text):
-    """Teks polos -> Atlassian Document Format (wajib di REST API v3)."""
-    return {
-        "type": "doc",
-        "version": 1,
-        "content": [
-            {"type": "paragraph", "content": [{"type": "text", "text": line}]}
-            for line in text.splitlines()
-            if line.strip()
-        ],
-    }
-
-
-def existing_summaries(cfg, parent):
-    result = api(
-        cfg,
-        "/search/jql",
-        "POST",
-        {"jql": f"parent = {parent}", "maxResults": 200, "fields": ["summary"]},
-    )
-    return {i["fields"]["summary"].strip() for i in result.get("issues", [])}
-
-
-def subtask_type_id(cfg, project):
-    """Cari id issue type sub-task, nama 'Sub-task' beda-beda tiap instance."""
-    r = api(cfg, f"/issue/createmeta/{project}/issuetypes")
-    types = r.get("issueTypes", r.get("values", []))
-    for t in types:
-        if t.get("subtask") and t["name"].lower() in ("sub-task", "subtask"):
-            return t["id"]
-    raise JiraError(f"Issue type Sub-task gak ketemu di project {project}")
 
 
 def main():
@@ -81,7 +56,7 @@ def main():
         project = parent.rsplit("-", 1)[0]
 
         if parent not in seen:
-            seen[parent] = existing_summaries(cfg, parent)
+            seen[parent] = set(existing_children(cfg, parent))
         if summary in seen[parent]:
             print(f"  SKIP (sudah ada) {parent} · {summary}")
             skipped += 1
@@ -93,21 +68,13 @@ def main():
 
         if project not in type_ids:
             type_ids[project] = subtask_type_id(cfg, project)
-        fields = {
-            "project": {"key": project},
-            "parent": {"key": parent},
-            "issuetype": {"id": type_ids[project]},
-            "summary": summary,
-            "assignee": {"accountId": me["accountId"]},
-            "duedate": due,
-        }
-        if (r.get("Description") or "").strip():
-            fields["description"] = adf(r["Description"])
-
-        res = api(cfg, "/issue", "POST", {"fields": fields})
+        key = create_subtask(
+            cfg, parent, summary, r.get("Description"), due, me["accountId"],
+            type_ids[project],
+        )
         seen[parent].add(summary)
         created += 1
-        log(f"DIBUAT {res['key']} di {parent} — {summary}")
+        log(f"DIBUAT {key} di {parent} — {summary}")
 
     if not dry_run:
         print(f"Selesai: {created} dibuat, {skipped} di-skip.")

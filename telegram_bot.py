@@ -6,6 +6,7 @@ Bot Telegram buat nge-done sub-task Jira secara manual.
   /next        sub-task yang paling lama nganggur
   /done KEY    langsung done issue tertentu
   /status      ringkasan antrian
+  /s           antrian dari Google Sheet, centang lalu create + done
 
 Long polling, stdlib doang. Jalankan: python3 telegram_bot.py
 """
@@ -14,6 +15,7 @@ import html
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +29,7 @@ from jira_client import (
     load_env,
     log,
 )
+import sheet_tasks
 
 PAGE_SIZE = 8
 LIST_LIMIT = 300
@@ -36,6 +39,8 @@ MAX_BULK = 50  # rem darurat biar salah tap gak nge-done ratusan issue
 # callback_data Telegram maks 64 byte, jadi pilihan gak bisa dititip di tombol.
 cache = {}  # chat_id -> list issue dari fetch terakhir
 selected = {}  # chat_id -> set key yang dicentang
+sheet_cache = {}  # chat_id -> baris pending dari Google Sheet
+sheet_selected = {}  # chat_id -> set nomor baris sheet yang dicentang
 
 
 def tg(method, payload=None):
@@ -204,6 +209,138 @@ def run_bulk(cfg, chat_id, message_id, page):
     edit(chat_id, message_id, text, back_button(page))
 
 
+# ---------- Antrian Google Sheet: create + langsung done ----------
+# callback: sp/sr:<page> (page/refresh), st:<row>:<page>, sa/sc:<page>
+# (pilih halaman / kosongkan), sb:<page> (konfirmasi), sx:<page> (jalankan)
+
+
+def build_sheet_list(chat_id, page=0, refresh=False):
+    if refresh or chat_id not in sheet_cache:
+        sheet_cache[chat_id] = sheet_tasks.pending_rows()
+    rows = sheet_cache[chat_id]
+    sel = sheet_selected.setdefault(chat_id, set())
+    sel &= {r["row"] for r in rows}
+    refresh_btn = [{"text": "🔄 Refresh", "callback_data": f"sr:{page}"}]
+    if not rows:
+        return "Sheet kosong, gak ada baris yang belum DONE. 🎉", [refresh_btn]
+
+    chunk, page, pages = page_chunk(rows, page)
+    lines = [
+        f"<b>{len(rows)} baris belum DONE</b> — halaman {page + 1}/{pages}"
+        f" · {len(sel)} dipilih",
+        "",
+    ]
+    buttons = []
+    for r in chunk:
+        mark = "☑️" if r["row"] in sel else "⬜"
+        extra = f" · <code>{r['Key']}</code>" if r["Key"] else ""
+        status = f"\n<i>{html.escape(r['Status'])}</i>" if r["Status"] else ""
+        lines.append(
+            f"{mark} <b>#{r['row']}</b> · <code>{r['Parent']}</code>{extra}\n"
+            f"{html.escape(r['Summary'])}{status}"
+        )
+        lines.append("")
+        buttons.append(
+            {"text": f"{mark} #{r['row']}", "callback_data": f"st:{r['row']}:{page}"}
+        )
+    keyboard = [buttons[n : n + 4] for n in range(0, len(buttons), 4)]
+    keyboard.append(
+        [
+            {"text": "☑️ Pilih hal. ini", "callback_data": f"sa:{page}"},
+            {"text": "⬜ Kosongkan", "callback_data": f"sc:{page}"},
+        ]
+    )
+    nav = []
+    if page > 0:
+        nav.append({"text": "⬅️ Prev", "callback_data": f"sp:{page - 1}"})
+    if page < pages - 1:
+        nav.append({"text": "Next ➡️", "callback_data": f"sp:{page + 1}"})
+    if nav:
+        keyboard.append(nav)
+    if sel:
+        keyboard.append(
+            [{"text": f"🚀 Create + Done ({len(sel)})", "callback_data": f"sb:{page}"}]
+        )
+    keyboard.append(refresh_btn)
+    return "\n".join(lines), keyboard
+
+
+def confirm_sheet(chat_id, message_id, page):
+    rows = [r for r in sheet_cache.get(chat_id, []) if r["row"] in sheet_selected.get(chat_id, ())]
+    back = [[{"text": "📋 Kembali", "callback_data": f"sp:{page}"}]]
+    if not rows:
+        edit(chat_id, message_id, "Belum ada yang dicentang.", back)
+        return
+    if len(rows) > MAX_BULK:
+        edit(chat_id, message_id, f"Kebanyakan: {len(rows)} dipilih, maksimal {MAX_BULK}.", back)
+        return
+    listing = "\n".join(
+        f"• #{r['row']} <code>{r['Parent']}</code> {html.escape(r['Summary'])}" for r in rows
+    )
+    edit(
+        chat_id,
+        message_id,
+        f"Bikin sub-task lalu langsung <b>DONE</b> untuk <b>{len(rows)} baris</b> ini?\n\n{listing}",
+        [
+            [
+                {"text": f"🚀 Ya, jalan {len(rows)}", "callback_data": f"sx:{page}"},
+                {"text": "❌ Batal", "callback_data": f"sp:{page}"},
+            ]
+        ],
+    )
+
+
+def run_sheet(cfg, chat_id, message_id, page):
+    picked = [r for r in sheet_cache.get(chat_id, []) if r["row"] in sheet_selected.get(chat_id, ())]
+    # Kosongkan duluan: tap dobel di tombol konfirmasi jadi gak jalan dua kali
+    sheet_selected[chat_id] = set()
+    back = [[{"text": "📋 Kembali ke sheet", "callback_data": f"sr:{page}"}]]
+    if not picked:
+        edit(chat_id, message_id, "Gak ada yang dipilih.", back)
+        return
+
+    # Baca ulang sheet: kalau barisnya geser/diedit sejak list ditampilkan,
+    # jangan sampai Key ditulis ke baris yang salah.
+    fresh = {r["row"]: r for r in sheet_tasks.pending_rows()}
+    runner = sheet_tasks.Runner(cfg)
+    ok, fail = [], []
+    for n, r in enumerate(picked, 1):
+        cur = fresh.get(r["row"])
+        if not cur or (cur["Parent"], cur["Summary"]) != (r["Parent"], r["Summary"]):
+            fail.append((r, "", "baris di sheet berubah / sudah DONE, refresh dulu"))
+            continue
+        edit(
+            chat_id,
+            message_id,
+            f"⏳ {n}/{len(picked)} · #{cur['row']} <code>{cur['Parent']}</code>\n"
+            f"{html.escape(cur['Summary'])}",
+        )
+        key, status, note = runner.process(cur)
+        if status == sheet_tasks.FINAL:
+            ok.append((cur, key, note))
+        else:
+            fail.append((cur, key, status))
+        if n < len(picked):
+            time.sleep(runner.delay)
+    sheet_cache.pop(chat_id, None)
+    log(f"SHEET bulk: {len(ok)} berhasil, {len(fail)} gagal")
+
+    base = cfg["base_url"].rstrip("/")
+    lines = [f"✅ <b>{len(ok)} berhasil</b>" + (f", ⚠️ <b>{len(fail)} gagal</b>" if fail else "")]
+    lines += [
+        f'• #{r["row"]} <a href="{base}/browse/{k}">{k}</a> {html.escape(r["Summary"])}'
+        + (f" <i>({html.escape(note)})</i>" if note != "dibuat" else "")
+        for r, k, note in ok
+    ]
+    if fail:
+        lines.append("")
+        lines += [
+            f"• #{r['row']} {('<code>' + k + '</code> ') if k else ''}{html.escape(err)}"
+            for r, k, err in fail
+        ]
+    edit(chat_id, message_id, "\n".join(lines), back)
+
+
 def handle_command(cfg, chat_id, text):
     cmd, _, arg = text.partition(" ")
     cmd = cmd.split("@")[0].lower()
@@ -216,10 +353,20 @@ def handle_command(cfg, chat_id, text):
             "/l — daftar sub-task open, centang lalu done sekaligus\n"
             "/next — sub-task yang paling lama nganggur\n"
             "/done KEY — langsung done issue tertentu\n"
-            "/status — ringkasan antrian",
+            "/status — ringkasan antrian\n"
+            "/s — antrian Google Sheet: centang, create sub-task, langsung DONE",
         )
     elif cmd == "/l":
         text, keyboard = build_list(cfg, chat_id, 0, refresh=True)
+        send(chat_id, text, keyboard)
+    elif cmd == "/s":
+        if not sheet_tasks.configured():
+            send(chat_id, "SHEET_ID belum diisi di .env")
+            return
+        try:
+            text, keyboard = build_sheet_list(chat_id, 0, refresh=True)
+        except JiraError as e:
+            text, keyboard = f"⚠️ Gagal baca sheet: {html.escape(str(e))}", None
         send(chat_id, text, keyboard)
     elif cmd == "/next":
         issues = list_open_subtasks(cfg, limit=1)
@@ -286,6 +433,24 @@ def handle_callback(cfg, cb):
             selected[chat_id] = set()
         text, keyboard = build_list(cfg, chat_id, int(rest))
         edit(chat_id, message_id, text, keyboard)
+    elif action in ("sp", "sr", "st", "sa", "sc"):
+        if action == "st":
+            row, _, rest = rest.partition(":")
+            sheet_selected.setdefault(chat_id, set()).symmetric_difference_update({int(row)})
+        elif action == "sa" and chat_id in sheet_cache:
+            chunk, _, _ = page_chunk(sheet_cache[chat_id], int(rest))
+            sheet_selected.setdefault(chat_id, set()).update(r["row"] for r in chunk)
+        elif action == "sc":
+            sheet_selected[chat_id] = set()
+        try:
+            text, keyboard = build_sheet_list(chat_id, int(rest), refresh=action == "sr")
+        except JiraError as e:
+            text, keyboard = f"⚠️ Gagal baca sheet: {html.escape(str(e))}", None
+        edit(chat_id, message_id, text, keyboard)
+    elif action == "sb":
+        confirm_sheet(chat_id, message_id, int(rest))
+    elif action == "sx":
+        run_sheet(cfg, chat_id, message_id, int(rest))
     elif action == "bulk":
         confirm_bulk(chat_id, message_id, int(rest))
     elif action == "bdo":

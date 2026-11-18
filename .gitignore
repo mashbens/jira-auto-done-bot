@@ -5,3 +5,5 @@ data/
 bot.out
 __pycache__/
 *.pyc
+credentials.json
+.venv/

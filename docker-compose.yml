@@ -9,6 +9,9 @@ services:
       TZ: ${TZ:-Asia/Jakarta}
     volumes:
       - ./data:/data
+      # Service account Google buat /s. Harus file beneran, kalau gak ada
+      # docker bakal bikin folder kosong dan /s gagal baca credentials.
+      - ./credentials.json:/app/credentials.json:ro
     restart: unless-stopped
     logging:
       driver: json-file

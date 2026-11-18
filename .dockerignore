@@ -8,3 +8,5 @@ bot.out
 README.md
 __pycache__/
 *.pyc
+credentials.json
+.venv/

@@ -1,9 +1,11 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
-PY := python3
+# Pakai venv kalau ada (butuh gspread buat /s), kalau gak ya python3 sistem
+PY := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
 .PHONY: help build up down restart logs ps shell \
-        dry-run next done import status bot-local stop-local clean env-check
+        dry-run next done import status bot-local stop-local clean env-check \
+        install sheet-check
 
 help: ## Tampilkan daftar perintah
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -63,7 +65,16 @@ env-check: ## Cek konfigurasi .env terbaca dan kredensial Jira valid
 	print('JQL      ->', cfg['jql'][:70] + '...'); \
 	print('Alur     ->', ' -> '.join(cfg['status_path']))"
 
+sheet-check: ## Cek koneksi Google Sheet dan tampilkan baris yang belum DONE
+	@$(PY) -c "from jira_client import load_env; load_env(); import sheet_tasks as s; \
+	rows = s.pending_rows(); print(f'Sheet OK -> {len(rows)} baris belum DONE'); \
+	[print(f\"  #{r['row']} {r['Parent']} {r['Summary'][:60]} {r['Status']}\") for r in rows]"
+
 ## --- Mode lokal (tanpa Docker) ---
+
+install: ## Bikin .venv dan install dependency (gspread)
+	python3 -m venv .venv
+	.venv/bin/pip install -r requirements.txt
 
 bot-local: ## Jalankan bot Telegram di foreground
 	$(PY) telegram_bot.py
@@ -76,4 +87,5 @@ stop-local: ## Matikan bot yang jalan di luar Docker
 
 clean: ## Hapus cache Python dan file sementara
 	rm -rf __pycache__ bot.out
+	@# .venv sengaja gak dihapus, bikin ulang pakai: make install
 	@echo "Bersih. State & log di data/ tidak disentuh."

@@ -125,11 +125,64 @@ def get_issue(cfg, key):
     return api(cfg, f"/issue/{key}?fields={','.join(FIELDS)}")
 
 
+def adf(text):
+    """Teks polos -> Atlassian Document Format (wajib di REST API v3)."""
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": line}]}
+            for line in text.splitlines()
+            if line.strip()
+        ],
+    }
+
+
+def existing_children(cfg, parent):
+    """{summary: key} anak-anak parent, buat ngecek duplikat sebelum create."""
+    result = api(
+        cfg,
+        "/search/jql",
+        "POST",
+        {"jql": f"parent = {parent}", "maxResults": 200, "fields": ["summary"]},
+    )
+    return {i["fields"]["summary"].strip(): i["key"] for i in result.get("issues", [])}
+
+
+def subtask_type_id(cfg, project):
+    """Cari id issue type sub-task, nama 'Sub-task' beda-beda tiap instance."""
+    r = api(cfg, f"/issue/createmeta/{project}/issuetypes")
+    types = r.get("issueTypes", r.get("values", []))
+    for t in types:
+        if t.get("subtask") and t["name"].lower() in ("sub-task", "subtask"):
+            return t["id"]
+    raise JiraError(f"Issue type Sub-task gak ketemu di project {project}")
+
+
+def create_subtask(cfg, parent, summary, description, due, assignee_id, type_id):
+    """Bikin satu sub-task, return key-nya."""
+    fields = {
+        "project": {"key": parent.rsplit("-", 1)[0]},
+        "parent": {"key": parent},
+        "issuetype": {"id": type_id},
+        "summary": summary,
+        "assignee": {"accountId": assignee_id},
+        "duedate": due,
+    }
+    if (description or "").strip():
+        fields["description"] = adf(description)
+    return api(cfg, "/issue", "POST", {"fields": fields})["key"]
+
+
 def complete_issue(cfg, issue):
     """Jalankan status_path pada satu issue. Return list langkah yang dilakukan."""
     key = issue["key"]
     current = issue["fields"]["status"]["name"]
     steps = []
+
+    # Sudah selesai: jangan dijalanin lagi, nanti malah dibalikin ke "in progress"
+    if issue["fields"]["status"].get("statusCategory", {}).get("key") == "done":
+        return [f"sudah {current}"]
 
     # Workflow ATIDIS26 punya validator "Due date is required" saat transisi.
     # Isi dulu kalau masih kosong, kalau tidak POST transisi bakal ditolak 400.
