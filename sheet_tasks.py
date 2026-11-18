@@ -3,8 +3,9 @@
 Antrian sub-task dari Google Sheet: create di Jira lalu langsung di-done.
 
 Tab sheet (default "Jira Subtask") kolomnya:
-  Parent | Summary | Description | Key | Status | Done At
-Parent/Summary/Description diisi manusia, Key/Status/Done At diisi bot.
+  Parent | Summary | Description | Key | Status | Done At | Link | Story Link
+Parent/Summary/Description diisi manusia, sisanya diisi bot.
+Link & Story Link opsional: kalau kolomnya ada, diisi URL Jira.
 
 Satu-satunya modul yang butuh dependency luar (gspread), soalnya login
 service account Google perlu tanda tangan RSA yang gak ada di stdlib.
@@ -28,6 +29,7 @@ from jira_client import (
 )
 
 HEADERS = ["Parent", "Summary", "Description", "Key", "Status", "Done At"]
+LINK_HEADERS = ["Link", "Story Link"]  # opsional
 FINAL = "DONE"
 
 _ws = None  # worksheet, dibuka sekali per proses
@@ -83,7 +85,11 @@ def pending_rows():
     return rows
 
 
-def write_back(row, key, status):
+def browse(base_url, key):
+    return f"{base_url.rstrip('/')}/browse/{key}" if key else ""
+
+
+def write_back(row, key, status, parent="", base_url=""):
     """Isi Key/Status/Done At di baris itu. Done At cuma diisi kalau DONE.
 
     Gagal nulis ke sheet gak boleh ngebatalin proses: Jira-nya sudah berubah,
@@ -95,13 +101,18 @@ def write_back(row, key, status):
         ws = worksheet()
         header = [h.strip() for h in ws.row_values(1)]
         done_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if status == FINAL else ""
+        values = {"Key": key, "Status": status, "Done At": done_at}
+        if base_url:
+            values["Link"] = browse(base_url, key)
+            values["Story Link"] = browse(base_url, parent)
         ws.batch_update(
             [
                 {
                     "range": gspread.utils.rowcol_to_a1(row, header.index(name) + 1),
                     "values": [[value]],
                 }
-                for name, value in (("Key", key), ("Status", status), ("Done At", done_at))
+                for name, value in values.items()
+                if name in header
             ]
         )
         return True
@@ -160,7 +171,7 @@ class Runner:
                 time.sleep(self.delay)
         except JiraError as e:
             status = f"GAGAL create: {e}"
-            ok = write_back(r["row"], key, status)
+            ok = write_back(r["row"], key, status, parent, self.cfg["base_url"])
             return key, status, "" if ok else "gagal nulis ke sheet"
 
         # Create sukses tapi done gagal = sub-task gantung. Coba sekali lagi,
@@ -176,6 +187,6 @@ class Runner:
                 log(f"SHEET done {key} gagal (percobaan {attempt + 1}): {e}")
                 time.sleep(2)
         status = FINAL if err is None else f"GAGAL done: {err}"
-        if not write_back(r["row"], key, status):
+        if not write_back(r["row"], key, status, parent, self.cfg["base_url"]):
             note += ", ⚠️ gagal nulis ke sheet"
         return key, status, note
